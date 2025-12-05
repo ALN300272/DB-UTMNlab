@@ -8,8 +8,8 @@
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="mb-0">Редактировать документ</h5>
-                <a href="{{ url_for('documents_list') }}" class="btn btn-outline-dark btn-sm">
-                    ← Назад к документам
+                <a href="{{ url_for('view_document', document_id=document.document_id) }}" class="btn btn-outline-dark btn-sm">
+                    ← Назад к документу
                 </a>
             </div>
             <div class="card-body">
@@ -19,7 +19,7 @@
                 </div>
                 {% endif %}
 
-                <form method="POST">
+                <form method="POST" enctype="multipart/form-data">
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
@@ -36,10 +36,26 @@
                             <div class="mb-3">
                                 <label class="form-label">Текущий файл</label>
                                 <div class="form-control bg-light">
-                                    {{ document.stored_file_path }}
+                                    <strong>{{ document.file_name }}</strong>
                                     <br>
-                                    <small class="text-muted">Размер: {{ "%.1f"|format(document.file_size / 1024 / 1024) }} МБ</small>
+                                    <small class="text-muted">
+                                        Путь: {{ document.stored_file_path }}<br>
+                                        Размер: {% if document.file_size %}
+                                            {{ "%.1f"|format(document.file_size / 1024 / 1024) }} МБ
+                                        {% else %}
+                                            неизвестно
+                                        {% endif %}
+                                    </small>
                                 </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label class="form-label">Заменить файл (опционально)</label>
+                                <input type="file" class="form-control" name="document_file" 
+                                       accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.txt">
+                                <small class="form-text text-muted">
+                                    Оставьте пустым, чтобы сохранить текущий файл
+                                </small>
                             </div>
                         </div>
                         
@@ -96,7 +112,7 @@
                     
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-primary">Сохранить изменения</button>
-                        <a href="{{ url_for('view_document', document_id=document.document_id) }}" class="btn btn-outline-secondary">Отмена</a>
+                        <a href="{{ url_for('view_document', document_id=document.document_id) }}" class="btn btn-secondary">Отмена</a>
                     </div>
                 </form>
             </div>

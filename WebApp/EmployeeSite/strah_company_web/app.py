@@ -13,13 +13,21 @@ from documents.access_control import (
     check_document_access, can_edit_document, can_delete_document
 )
 from documents.notifications import create_notification, get_user_notifications
-from documents.file_storage import save_document_file, get_document_file_path, delete_document_file
+# В начале файла app.py
+from documents.file_storage import (
+    save_document_file, 
+    get_document_file_path, 
+    delete_document_file, find_document_file, update_document_safely, get_upload_folder,
+    document_file_exists 
+)
 from config import allowed_file
 import os
 
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+
 
 
 # Убедитесь, что SECRET_KEY установлен
@@ -605,10 +613,17 @@ def download_document(document_id):
         if not has_access or not document:
             return redirect(url_for('documents_list', error="Доступ к файлу запрещен"))
         
-        # Проверяем существует ли файл
+        # Получаем путь к файлу
         file_path = get_document_file_path(document['stored_file_path'])
+        
+        # Если файл не найден по основному пути, ищем по имени
         if not os.path.exists(file_path):
-            return redirect(url_for('documents_list', error="Файл не найден"))
+            alt_path = find_document_file(document['file_name'])
+            if alt_path:
+                file_path = alt_path
+            else:
+                return redirect(url_for('documents_list', 
+                                      error=f"Файл не найден: {document['file_name']}"))
         
         # Отправляем файл для скачивания
         return send_file(file_path, 
@@ -626,27 +641,24 @@ def add_document():
     try:
         user_id = session.get('user_id')
         user_role = session.get('user_role')
-        user_dept_id = session.get('user_dept_id')
+        user_dept_id = get_user_department(user_id)
         
-        # Проверяем права на добавление документов
-        allowed_roles = ['department_manager', 'hr_manager', 'company_director', 'db_admin']
-        
-        # Аудитор из отдела безопасности также может добавлять документы
-        if user_role == 'auditor' and user_dept_id == 4:
-            allowed_roles.append('auditor')
-        
-        if user_role not in allowed_roles:
+        if user_role not in ['department_manager', 'hr_manager', 'company_director', 'db_admin']:
             return render_template('shared/access_denied.html', 
                                  error="Недостаточно прав для добавления документов")
         
-        # Получаем справочные данные
         departments = execute_query("SELECT department_id, name FROM departments ORDER BY name")
         employees = execute_query("SELECT employee_id, full_name FROM employees WHERE is_active = true ORDER BY full_name")
         policies = execute_query("SELECT policy_id, policy_number FROM policies ORDER BY policy_number")
         
         if request.method == 'POST':
+            print(f"DEBUG: Request method: POST")
+            print(f"DEBUG: Request files: {request.files}")
+            print(f"DEBUG: Request form: {request.form}")
+            
             # Обработка загрузки файла
             if 'document_file' not in request.files:
+                print(f"DEBUG: No document_file in request.files")
                 return render_template('company_director/documents/add_document.html',
                                     departments=departments,
                                     employees=employees,
@@ -654,7 +666,12 @@ def add_document():
                                     error="Файл не выбран")
             
             file = request.files['document_file']
+            print(f"DEBUG: File object: {file}")
+            print(f"DEBUG: File filename: {file.filename}")
+            print(f"DEBUG: File content type: {file.content_type if hasattr(file, 'content_type') else 'No content type'}")
+            
             if file.filename == '':
+                print(f"DEBUG: Empty filename")
                 return render_template('company_director/documents/add_document.html',
                                     departments=departments,
                                     employees=employees,
@@ -662,6 +679,7 @@ def add_document():
                                     error="Файл не выбран")
             
             if file and not allowed_file(file.filename):
+                print(f"DEBUG: File not allowed: {file.filename}")
                 return render_template('company_director/documents/add_document.html',
                                     departments=departments,
                                     employees=employees,
@@ -670,17 +688,17 @@ def add_document():
             
             # Получаем данные из формы
             file_name = request.form.get('file_name', '').strip() or file.filename
+            print(f"DEBUG: Form file_name: {request.form.get('file_name')}")
+            print(f"DEBUG: Using file_name: {file_name}")
+            
             description = request.form.get('description', '').strip()
             confidentiality_level = request.form.get('confidentiality_level', '0')
             policy_id = request.form.get('policy_id') or None
+            created_by_employee_id = request.form.get('created_by_employee_id', user_id)
+            created_in_department_id = request.form.get('created_in_department_id', user_dept_id)
             
-            # Для аудиторов и начальников отделов - документы создаются в их отделе
-            if user_role in ['department_manager', 'auditor'] and user_dept_id:
-                created_in_department_id = user_dept_id
-                created_by_employee_id = user_id
-            else:
-                created_by_employee_id = request.form.get('created_by_employee_id', user_id)
-                created_in_department_id = request.form.get('created_in_department_id', user_dept_id)
+            print(f"DEBUG: Form data - confidentiality_level: {confidentiality_level}, "
+                  f"dept_id: {created_in_department_id}, employee_id: {created_by_employee_id}")
             
             # Валидация
             if not file_name:
@@ -690,17 +708,16 @@ def add_document():
                                     policies=policies,
                                     error="Название файла обязательно")
             
-            if not created_in_department_id:
-                return render_template('company_director/documents/add_document.html',
-                                    departments=departments,
-                                    employees=employees,
-                                    policies=policies,
-                                    error="Необходимо указать отдел")
-            
-            # Сохраняем файл
+            # Сохраняем файл С ОРИГИНАЛЬНЫМ ИМЕНЕМ
+            print(f"DEBUG: Calling save_document_file...")
             stored_file_path, saved_filename, file_size = save_document_file(
-                file, created_in_department_id, int(confidentiality_level)
+                file, 
+                int(created_in_department_id), 
+                int(confidentiality_level),
+                use_original_name=True
             )
+            
+            print(f"DEBUG: save_document_file returned: {stored_file_path}, {saved_filename}, {file_size}")
             
             if not stored_file_path:
                 return render_template('company_director/documents/add_document.html',
@@ -708,6 +725,17 @@ def add_document():
                                     employees=employees,
                                     policies=policies,
                                     error="Ошибка при сохранении файла")
+            
+            # Проверяем, что файл физически существует
+            upload_folder = get_upload_folder()
+            full_path = os.path.join(upload_folder, stored_file_path)
+            if not os.path.exists(full_path):
+                print(f"DEBUG: ERROR: File doesn't exist at {full_path}")
+                return render_template('company_director/documents/add_document.html',
+                                    departments=departments,
+                                    employees=employees,
+                                    policies=policies,
+                                    error="Файл не был сохранен на диск")
             
             # Сохраняем документ в БД
             insert_query = """
@@ -717,53 +745,65 @@ def add_document():
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
             
+            print(f"DEBUG: Executing DB insert...")
             execute_query(insert_query, (
                 policy_id, created_by_employee_id, created_in_department_id,
                 file_name, description, stored_file_path, file_size, confidentiality_level
             ), fetch=False)
             
+            print(f"DEBUG: Document added successfully!")
             return redirect(url_for('documents_list', success="Документ успешно добавлен"))
-        
-        # Для аудиторов и начальников отделов предзаполняем отдел
-        default_department_id = user_dept_id if user_role in ['department_manager', 'auditor'] else None
         
         return render_template('company_director/documents/add_document.html',
                             departments=departments,
                             employees=employees,
-                            policies=policies,
-                            default_department_id=default_department_id)
+                            policies=policies)
                             
     except Exception as e:
-        print(f"Error adding document: {e}")
+        print(f"ERROR in add_document: {e}")
+        import traceback
+        traceback.print_exc()
         return render_template('company_director/documents/add_document.html',
-                            departments=[],
-                            employees=[],
-                            policies=[],
+                            departments=departments,
+                            employees=employees,
+                            policies=policies,
                             error=f"Ошибка при добавлении документа: {str(e)}")
     
 
 @app.route('/documents/<int:document_id>/edit', methods=['GET', 'POST'])
 @login_required
 def edit_document(document_id):
-    """Редактирование документа с уведомлением создателю"""
+    """Редактирование документа с возможностью замены файла"""
     try:
         user_id = session.get('user_id')
         user_role = session.get('user_role')
-        user_dept_id = session.get('user_dept_id')
+        user_dept_id = get_user_department(user_id)
         
-        # Проверяем доступ к редактированию документа
+        # Проверяем доступ к редактированию
         has_access, document = check_document_access(user_role, user_dept_id, user_id, document_id, 'edit')
         
         if not has_access:
             return render_template('shared/access_denied.html', 
                                  error="Недостаточно прав для редактирования документа")
         
-        # Получаем справочные данные
-        departments = execute_query("SELECT department_id, name FROM departments ORDER BY name")
-        employees = execute_query("SELECT employee_id, full_name FROM employees WHERE is_active = true ORDER BY full_name")
-        policies = execute_query("SELECT policy_id, policy_number FROM policies ORDER BY policy_number")
+        # GET запрос - показываем форму
+        if request.method == 'GET':
+            departments = execute_query("SELECT department_id, name FROM departments ORDER BY name")
+            employees = execute_query("SELECT employee_id, full_name FROM employees WHERE is_active = true ORDER BY full_name")
+            policies = execute_query("SELECT policy_id, policy_number FROM policies ORDER BY policy_number")
+            
+            return render_template('company_director/documents/edit_document.html',
+                                document=document,
+                                departments=departments,
+                                employees=employees,
+                                policies=policies)
         
-        if request.method == 'POST':
+        # POST запрос - обрабатываем форму
+        else:
+            print(f"DEBUG: Editing document {document_id}")
+            print(f"DEBUG: Request form: {dict(request.form)}")
+            print(f"DEBUG: Request files: {dict(request.files)}")
+            
             # Получаем данные из формы
             file_name = request.form.get('file_name', '').strip()
             description = request.form.get('description', '').strip()
@@ -772,75 +812,79 @@ def edit_document(document_id):
             created_by_employee_id = request.form.get('created_by_employee_id')
             created_in_department_id = request.form.get('created_in_department_id')
             
+            # Проверяем, загружен ли новый файл
+            new_file = None
+            file_changed = False
+            new_file_path = None
+            new_file_size = None
+            
+            if 'document_file' in request.files and request.files['document_file'].filename:
+                new_file = request.files['document_file']
+                print(f"DEBUG: New file uploaded: {new_file.filename}")
+                
+                if new_file and allowed_file(new_file.filename):
+                    # Сохраняем новый файл
+                    new_file_path, saved_filename, new_file_size = save_document_file(
+                        new_file,
+                        int(created_in_department_id),
+                        int(confidentiality_level),
+                        document_id,  # Передаем ID для удаления старого файла
+                        use_original_name=True
+                    )
+                    
+                    if new_file_path:
+                        file_changed = True
+                        print(f"DEBUG: File changed successfully: {new_file_path}")
+                    else:
+                        return redirect(url_for('view_document', document_id=document_id,
+                                              error="Ошибка при сохранении нового файла"))
+            
             # Валидация
             if not file_name:
-                return render_template('company_director/documents/edit_document.html',
-                                    document=document,
-                                    departments=departments,
-                                    employees=employees,
-                                    policies=policies,
-                                    error="Название файла обязательно")
+                return redirect(url_for('view_document', document_id=document_id,
+                                      error="Название файла обязательно"))
             
-            if not created_by_employee_id:
-                return render_template('company_director/documents/edit_document.html',
-                                    document=document,
-                                    departments=departments,
-                                    employees=employees,
-                                    policies=policies,
-                                    error="Необходимо указать сотрудника")
+            # Подготавливаем данные для обновления
+            update_data = {
+                'file_name': file_name,
+                'description': description,
+                'confidentiality_level': confidentiality_level,
+                'policy_id': policy_id,
+                'created_by_employee_id': created_by_employee_id,
+                'created_in_department_id': created_in_department_id
+            }
             
-            if not created_in_department_id:
-                return render_template('company_director/documents/edit_document.html',
-                                    document=document,
-                                    departments=departments,
-                                    employees=employees,
-                                    policies=policies,
-                                    error="Необходимо указать отдел")
+            # Если файл изменился, добавляем новые путь и размер
+            if file_changed and new_file_path and new_file_size:
+                update_data['stored_file_path'] = new_file_path
+                update_data['file_size'] = new_file_size
+                print(f"DEBUG: Updating file path to: {new_file_path}")
             
-            # Формируем описание изменений
-            change_description = ""
-            if document['file_name'] != file_name:
-                change_description += f"Название изменено с '{document['file_name']}' на '{file_name}'. "
-            if document['description'] != description:
-                change_description += "Изменено описание. "
-            if int(document['confidentiality_level']) != int(confidentiality_level):
-                change_description += f"Уровень доступа изменен с {document['confidentiality_level']} на {confidentiality_level}. "
+            # Безопасное обновление в БД
+            update_success = update_document_safely(document_id, update_data)
             
-            # Обновляем документ в БД
-            update_query = """
-                UPDATE documents SET
-                    policy_id = %s,
-                    created_by_employee_id = %s,
-                    created_in_department_id = %s,
-                    file_name = %s,
-                    description = %s,
-                    confidentiality_level = %s
-                WHERE document_id = %s
-            """
+            if not update_success:
+                # Если файл был загружен, но обновление БД не удалось, удаляем новый файл
+                if file_changed and new_file_path:
+                    delete_document_file(new_file_path)
+                return redirect(url_for('view_document', document_id=document_id,
+                                      error="Ошибка при обновлении документа в БД"))
             
-            execute_query(update_query, (
-                policy_id, created_by_employee_id, created_in_department_id,
-                file_name, description, confidentiality_level,
-                document_id
-            ), fetch=False)
+            # Создаем уведомление
+            change_description = f"Документ '{file_name}' был изменен"
+            if file_changed:
+                change_description += " (файл заменен)"
+            create_notification(document_id, user_id, change_description)
             
-            # Создаем уведомление об изменении
-            if change_description:
-                create_notification(document_id, user_id, change_description.strip())
-            else:
-                create_notification(document_id, user_id, "Документ был отредактирован")
-            
-            return redirect(url_for('view_document', document_id=document_id, success="Документ успешно обновлен"))
-        
-        return render_template('company_director/documents/edit_document.html',
-                            document=document,
-                            departments=departments,
-                            employees=employees,
-                            policies=policies)
+            return redirect(url_for('view_document', document_id=document_id, 
+                                  success="Документ успешно обновлен"))
                             
     except Exception as e:
-        print(f"Error editing document: {e}")
-        return redirect(url_for('documents_list', error=f"Ошибка при редактировании документа: {str(e)}"))
+        print(f"ERROR editing document: {e}")
+        import traceback
+        traceback.print_exc()
+        return redirect(url_for('view_document', document_id=document_id,
+                              error=f"Ошибка при редактировании документа: {str(e)}"))
     
 @app.route('/documents/<int:document_id>/delete', methods=['POST'])
 @login_required
@@ -1819,6 +1863,82 @@ def auditor_clients():
     except Exception as e:
         return render_template('auditor/clients.html', clients=[])
     
+
+    
+
+@app.route('/documents/<int:document_id>/replace', methods=['POST'])
+@login_required
+def replace_document_file(document_id):
+    """Замена файла документа"""
+    try:
+        user_id = session.get('user_id')
+        user_role = session.get('user_role')
+        user_dept_id = get_user_department(user_id)
+        
+        # Проверяем доступ
+        has_access, document = check_document_access(user_role, user_dept_id, user_id, document_id, 'edit')
+        
+        if not has_access:
+            return redirect(url_for('view_document', document_id=document_id, 
+                                  error="Недостаточно прав для замены файла"))
+        
+        # Проверка файла
+        if 'document_file' not in request.files:
+            return redirect(url_for('view_document', document_id=document_id,
+                                  error="Файл не выбран"))
+        
+        file = request.files['document_file']
+        if file.filename == '':
+            return redirect(url_for('view_document', document_id=document_id,
+                                  error="Файл не выбран"))
+        
+        if file and not allowed_file(file.filename):
+            return redirect(url_for('view_document', document_id=document_id,
+                                  error="Недопустимый тип файла"))
+        
+        # Сохраняем новый файл С ОРИГИНАЛЬНЫМ ИМЕНЕМ
+        stored_file_path, saved_filename, file_size = save_document_file(
+            file, 
+            document['created_in_department_id'], 
+            document['confidentiality_level'],
+            document_id,
+            use_original_name=True  # ← ВАЖНО!
+        )
+        
+        if not stored_file_path:
+            return redirect(url_for('view_document', document_id=document_id,
+                                  error="Ошибка при сохранении файла"))
+        
+        # Имя файла из формы или из загруженного файла
+        new_filename = request.form.get('file_name') or saved_filename or file.filename
+        
+        # БЕЗОПАСНОЕ ОБНОВЛЕНИЕ
+        update_success = update_document_safely(
+            document_id,
+            {
+                'stored_file_path': stored_file_path,
+                'file_size': file_size,
+                'file_name': new_filename
+            }
+        )
+        
+        if not update_success:
+            # Удаляем только что сохраненный файл
+            delete_document_file(stored_file_path)
+            return redirect(url_for('view_document', document_id=document_id,
+                                  error="Ошибка при обновлении записи в БД"))
+        
+        # Создаем уведомление
+        change_description = f"Файл документа '{new_filename}' был заменен"
+        create_notification(document_id, user_id, change_description)
+        
+        return redirect(url_for('view_document', document_id=document_id,
+                              success="Файл успешно заменен"))
+        
+    except Exception as e:
+        print(f"Error replacing document file: {e}")
+        return redirect(url_for('view_document', document_id=document_id,
+                              error=f"Ошибка при замене файла: {str(e)}"))
 
     
 

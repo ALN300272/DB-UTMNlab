@@ -60,13 +60,18 @@ def can_view_document(user_role, user_dept_id, user_id, document):
         return (document.get('created_in_department_id') == user_dept_id 
                 and document.get('confidentiality_level') in [0, 1])
     
-    # Аудитор видит документы своего отдела безопасности (уровни 0,1,2) и публичные
+    # Аудитор
     if user_role == 'auditor':
         # Аудитор из отдела безопасности видит все документы своего отдела
-        if user_dept_id == 4:  # ID отдела безопасности
+        if user_dept_id == 4:  # Отдел безопасности
             return document.get('created_in_department_id') == user_dept_id
-        # Остальные аудиторы видят публичные и ДСП
-        return document.get('confidentiality_level') in [0, 1]
+        else:
+            # Остальные аудиторы видят публичные и ДСП
+            return document.get('confidentiality_level') in [0, 1]
+    
+    # Публичные пользователи
+    if user_role == 'public_users':
+        return document.get('confidentiality_level') == 0
     
     return False
 
@@ -148,10 +153,8 @@ def get_documents_for_user(user_role, user_dept_id, user_id):
     """
     
     try:
-        # УБЕДИТЕСЬ что user_dept_id передается правильно!
-        print(f"DEBUG: get_documents_for_user - role={user_role}, dept={user_dept_id}, user={user_id}")
-        
         if user_role in ['company_director', 'db_admin']:
+            # Видят все документы
             return execute_query("""
                 SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
                 FROM documents d
@@ -161,32 +164,31 @@ def get_documents_for_user(user_role, user_dept_id, user_id):
             """)
         
         elif user_role == 'department_manager':
-            print(f"DEBUG: Department manager query for department_id = {user_dept_id}")
-            # Начальник отдела видит все документы своего отдела
-            result = execute_query("""
-                SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
-                FROM documents d
-                LEFT JOIN departments dep ON d.created_in_department_id = dep.department_id
-                LEFT JOIN employees emp ON d.created_by_employee_id = emp.employee_id
-                WHERE d.created_in_department_id = %s
-                ORDER BY d.created_at DESC
-            """, (user_dept_id,))
-            print(f"DEBUG: Found {len(result) if result else 0} documents")
-            return result
-        
-        elif user_role == 'hr_manager':
-            # Видят документы своего отдела (уровни 0,1)
+            # Видят все документы своего отдела И все публичные документы
             return execute_query("""
                 SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
                 FROM documents d
                 LEFT JOIN departments dep ON d.created_in_department_id = dep.department_id
                 LEFT JOIN employees emp ON d.created_by_employee_id = emp.employee_id
-                WHERE d.created_in_department_id = %s AND d.confidentiality_level IN (0, 1)
+                WHERE d.created_in_department_id = %s 
+                   OR d.confidentiality_level = 0
+                ORDER BY d.created_at DESC
+            """, (user_dept_id,))
+        
+        elif user_role == 'hr_manager':
+            # Видят документы своего отдела (уровни 0,1) И все публичные
+            return execute_query("""
+                SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
+                FROM documents d
+                LEFT JOIN departments dep ON d.created_in_department_id = dep.department_id
+                LEFT JOIN employees emp ON d.created_by_employee_id = emp.employee_id
+                WHERE (d.created_in_department_id = %s AND d.confidentiality_level IN (0, 1))
+                   OR d.confidentiality_level = 0
                 ORDER BY d.created_at DESC
             """, (user_dept_id,))
         
         elif user_role == 'employee':
-            # Видят документы своего отдела (уровни 0,1) и свои документы
+            # Видят документы своего отдела (уровни 0,1), свои документы И все публичные
             return execute_query("""
                 SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
                 FROM documents d
@@ -194,6 +196,7 @@ def get_documents_for_user(user_role, user_dept_id, user_id):
                 LEFT JOIN employees emp ON d.created_by_employee_id = emp.employee_id
                 WHERE (d.created_in_department_id = %s AND d.confidentiality_level IN (0, 1))
                    OR d.created_by_employee_id = %s
+                   OR d.confidentiality_level = 0
                 ORDER BY d.created_at DESC
             """, (user_dept_id, user_id))
         
@@ -218,6 +221,17 @@ def get_documents_for_user(user_role, user_dept_id, user_id):
                     WHERE d.confidentiality_level IN (0, 1)
                     ORDER BY d.created_at DESC
                 """)
+        
+        elif user_role == 'public_users':
+            # Видят только публичные документы
+            return execute_query("""
+                SELECT d.*, dep.name as department_name, emp.full_name as created_by_name
+                FROM documents d
+                LEFT JOIN departments dep ON d.created_in_department_id = dep.department_id
+                LEFT JOIN employees emp ON d.created_by_employee_id = emp.employee_id
+                WHERE d.confidentiality_level = 0
+                ORDER BY d.created_at DESC
+            """)
         
         else:
             return []
